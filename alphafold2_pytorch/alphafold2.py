@@ -174,6 +174,7 @@ class FeedForward(nn.Module):
 
 class Attention(nn.Module):
     """
+    Used in multiple algorithms: 7, 8, 13, 14 (Gated Self-Attention)
     多头自注意力机制（带门控）
 
     这是 AlphaFold2 中使用的注意力机制，具有以下特点：
@@ -399,6 +400,7 @@ class AxialAttention(nn.Module):
 
 class TriangleMultiplicativeModule(nn.Module):
     """
+    Algorithm 11 (Outgoing) / Algorithm 12 (Incoming)
     三角乘法模块（Triangle Multiplicative Module）
 
     这是 AlphaFold2 的核心创新之一，用于更新成对表示。
@@ -412,8 +414,8 @@ class TriangleMultiplicativeModule(nn.Module):
         dim: 输入和输出维度
         hidden_dim: 隐藏层维度
         mix: 混合方式 ('ingoing' 或 'outgoing')
-            - 'outgoing': 沿着出边聚合 (i->k, j->k 推断 i-j)
-            - 'ingoing': 沿着入边聚合 (k->i, k->j 推断 i-j)
+            - 'outgoing': 沿着出边聚合 (i->k, j->k 推断 i-j) - Algorithm 11
+            - 'ingoing': 沿着入边聚合 (k->i, k->j 推断 i-j) - Algorithm 12
     """
     def __init__(
         self,
@@ -498,6 +500,7 @@ class TriangleMultiplicativeModule(nn.Module):
 
 class OuterMean(nn.Module):
     """
+    Algorithm 9 / Algorithm 10 - OuterProductMean
     外积均值（Outer Product Mean）
 
     从 MSA 表示生成成对表示的模块。
@@ -554,12 +557,17 @@ class OuterMean(nn.Module):
 
 class PairwiseAttentionBlock(nn.Module):
     """
+    Algorithm 6 - line 5-12: Pair stack operations
     成对注意力块（Pairwise Attention Block）
 
     更新成对残基表示的主要模块，包含：
-    1. OuterMean: 从 MSA 生成成对信息
+    1. OuterMean: 从 MSA 生成成对信息 (Algorithm 9/10: OuterProductMean)
     2. Triangle Multiplication (出边/入边): 利用三角不等式传播信息
+       - Algorithm 11: TriangleMultiplicationOutgoing
+       - Algorithm 12: TriangleMultiplicationIncoming
     3. Triangle Attention (行/列): 沿着行列方向的注意力
+       - Algorithm 13: TriangleAttentionStartingNode
+       - Algorithm 14: TriangleAttentionEndingNode
 
     参数:
         dim: 特征维度
@@ -609,13 +617,18 @@ class PairwiseAttentionBlock(nn.Module):
         返回:
             更新后的成对表示 (batch, seq_len, seq_len, dim)
         """
+        # Algorithm 9/10 - OuterProductMean
         # 如果提供了 MSA，通过外积均值更新成对表示
         if exists(msa_repr):
             x = x + self.outer_mean(msa_repr, mask = msa_mask)
 
+        # Algorithm 11 - TriangleMultiplicationOutgoing
+        # Algorithm 12 - TriangleMultiplicationIncoming
         # 三角乘法更新（出边和入边）
         x = self.triangle_multiply_outgoing(x, mask = mask) + x
         x = self.triangle_multiply_ingoing(x, mask = mask) + x
+        # Algorithm 13 - TriangleAttentionStartingNode
+        # Algorithm 14 - TriangleAttentionEndingNode
         # 三角注意力更新（行和列）
         x = self.triangle_attention_outgoing(x, edges = x, mask = mask) + x
         x = self.triangle_attention_ingoing(x, edges = x, mask = mask) + x
@@ -623,11 +636,14 @@ class PairwiseAttentionBlock(nn.Module):
 
 class MsaAttentionBlock(nn.Module):
     """
+    Algorithm 6 - line 2-3: MSA row and column attention
     MSA 注意力块（MSA Attention Block）
 
     更新 MSA 表示的模块，包含：
     1. 行注意力（Row Attention）: 在序列维度上进行注意力，允许成对表示作为偏置
+       - Algorithm 7: MSARowAttentionWithPairBias
     2. 列注意力（Column Attention）: 在 MSA 维度上进行注意力
+       - Algorithm 8: MSAColumnAttention
 
     这使得模型可以：
     - 在同一 MSA 序列的不同位置之间传播信息（行注意力）
@@ -671,8 +687,10 @@ class MsaAttentionBlock(nn.Module):
         返回:
             更新后的 MSA 表示 (batch, num_msa, seq_len, dim)
         """
+        # Algorithm 7 - MSARowAttentionWithPairBias
         # 行注意力：利用成对表示作为注意力偏置
         x = self.row_attn(x, mask = mask, edges = pairwise_repr) + x
+        # Algorithm 8 - MSAColumnAttention
         # 列注意力：在 MSA 序列间传播信息
         x = self.col_attn(x, mask = mask) + x
         return x
@@ -681,6 +699,8 @@ class MsaAttentionBlock(nn.Module):
 
 class EvoformerBlock(nn.Module):
     """
+    Algorithm 6 - EvoformerStack (single block)
+
     Evoformer 块
 
     AlphaFold2 的核心计算单元，同时更新 MSA 表示和成对表示。
@@ -736,11 +756,14 @@ class EvoformerBlock(nn.Module):
         x, m, mask, msa_mask = inputs
         attn, ff, msa_attn, msa_ff = self.layer
 
+        # Algorithm 6 - line 2-4: MSA stack (row attention, column attention, transition)
         # msa attention and transition - MSA 注意力和前馈
 
         m = msa_attn(m, mask = msa_mask, pairwise_repr = x)
         m = msa_ff(m) + m
 
+        # Algorithm 6 - line 5-10: Communication (outer product mean, triangular operations)
+        # Algorithm 6 - line 11-12: Pair stack (triangular attention, transition)
         # pairwise attention and transition - 成对注意力和前馈
 
         x = attn(x, mask = mask, msa_repr = m, msa_mask = msa_mask)
@@ -1019,6 +1042,7 @@ class Alphafold2(nn.Module):
         return_recyclables = False,
         return_aux_logits = False
     ):
+        # Algorithm 2 - Inference (AlphaFold Model Inference)
         """
         前向传播
 
@@ -1061,6 +1085,7 @@ class Alphafold2(nn.Module):
 
         assert msa.shape[-1] == seq.shape[-1], 'sequence length of MSA and primary sequence must be the same'
 
+        # Algorithm 2 - line 1: Initialize representations
         # variables - 获取批次大小、序列长度和设备
 
         b, n, device = *seq.shape[:2], seq.device
@@ -1071,6 +1096,7 @@ class Alphafold2(nn.Module):
         if isinstance(seq, (list, tuple)):
             seq, seq_pos = seq
 
+        # Algorithm 2 - line 2: Embed input features (sequence embedding)
         # embed main sequence - 嵌入主序列
 
         x = self.token_emb(seq)
@@ -1088,6 +1114,7 @@ class Alphafold2(nn.Module):
             noised_msa, replaced_msa_mask = self.mlm.noise(msa, msa_mask)
             msa = noised_msa
 
+        # Algorithm 2 - line 3: Embed MSA features
         # embed multiple sequence alignment (msa) - 嵌入多序列比对
 
         if exists(msa):
@@ -1113,6 +1140,7 @@ class Alphafold2(nn.Module):
         else:
             raise Error('either MSA or embeds must be given')
 
+        # Algorithm 2 - line 4: Initialize pair representation with relative positions
         # derive pairwise representation - 生成成对残基表示
 
         x_left, x_right = self.to_pairwise_repr(x).chunk(2, dim = -1)
@@ -1132,6 +1160,7 @@ class Alphafold2(nn.Module):
 
         x = x + rel_pos_emb
 
+        # Algorithm 2 - line 5-6: Add previous cycle outputs (recycling)
         # add recyclables, if present - 添加循环信息（用于迭代细化）
 
         if exists(recyclables):
@@ -1148,6 +1177,7 @@ class Alphafold2(nn.Module):
 
             x = x + distance_embed
 
+        # Algorithm 2 - line 7-9: Process template features
         # embed templates, if present - 嵌入模板结构信息
 
         if exists(templates_feats):
@@ -1195,6 +1225,7 @@ class Alphafold2(nn.Module):
             template_pooled = rearrange(template_pooled, '(b i j) () d -> b i j d', i = n, j = n)
             x = x + template_pooled
 
+        # Algorithm 2 - line 10: Add template torsion angle features to MSA
         # add template angle features to MSAs - 将模板角度特征添加到 MSA
         # 通过 MLP 处理后连接到 MSA
 
@@ -1203,6 +1234,7 @@ class Alphafold2(nn.Module):
             m = torch.cat((m, t_angle_feats), dim = 1)  # 在 MSA 维度上连接
             msa_mask = torch.cat((msa_mask, templates_mask), dim = 1)
 
+        # Algorithm 2 - line 11-12: Extra MSA stack
         # embed extra msa, if present - 处理额外的 MSA（如果存在）
 
         if exists(extra_msa):
@@ -1217,6 +1249,7 @@ class Alphafold2(nn.Module):
                 msa_mask = extra_msa_mask
             )
 
+        # Algorithm 2 - line 13: Main Evoformer stack (48 blocks)
         # trunk - 主干 Evoformer
 
         x, m = self.net(
@@ -1230,6 +1263,7 @@ class Alphafold2(nn.Module):
 
         ret = ReturnValues()
 
+        # Algorithm 2 - line 14-17: Predict auxiliary outputs (distogram and angles)
         # calculate theta and phi before symmetrization
         # 在对称化之前计算 theta 和 phi 角（这两个角是非对称的）
 
@@ -1261,6 +1295,7 @@ class Alphafold2(nn.Module):
         if not self.predict_coords or return_trunk:
             return ret
 
+        # Algorithm 2 - line 18: Extract single and pair representations for structure module
         # derive single and pairwise embeddings for structural refinement
         # 为结构细化准备单链和成对嵌入
 
@@ -1275,16 +1310,19 @@ class Alphafold2(nn.Module):
         original_dtype = single_repr.dtype
         single_repr, pairwise_repr = map(lambda t: t.float(), (single_repr, pairwise_repr))
 
+        # Algorithm 2 - line 19-24: Structure module with iterative IPA refinement (see Algorithm 20)
         # iterative refinement with equivariant transformer in high precision
         # 使用等变 Transformer 进行迭代细化（高精度）
 
         with torch_default_dtype(torch.float32):
 
+            # Algorithm 20 - line 1: Initialize backbone frames (quaternions and translations)
             # 初始化旋转（单位四元数）和平移（零向量）
             quaternions = torch.tensor([1., 0., 0., 0.], device = device)  # [w, x, y, z]
             quaternions = repeat(quaternions, 'd -> b n d', b = b, n = n)
             translations = torch.zeros((b, n, 3), device = device)
 
+            # Algorithm 20 - line 2-11: Iterate over structure module layers
             # go through the layers and apply invariant point attention and feedforward
             # 迭代应用不变点注意力和更新
 
@@ -1299,6 +1337,7 @@ class Alphafold2(nn.Module):
                 if not is_last:
                     rotations = rotations.detach()
 
+                # Algorithm 20 - line 3-5: Invariant Point Attention (IPA)
                 # 不变点注意力（IPA）- 考虑当前坐标系
                 single_repr = self.ipa_block(
                     single_repr,
@@ -1308,6 +1347,7 @@ class Alphafold2(nn.Module):
                     translations = translations
                 )
 
+                # Algorithm 20 - line 6-9: Update backbone frames
                 # update quaternion and translation - 更新四元数和平移
 
                 quaternion_update, translation_update = self.to_quaternion_update(single_repr).chunk(2, dim = -1)
@@ -1318,6 +1358,7 @@ class Alphafold2(nn.Module):
                 # 应用平移更新（在当前坐标系中）
                 translations = translations + einsum('b n c, b n c r -> b n r', translation_update, rotations)
 
+            # Algorithm 20 - line 10-11: Compute final atom positions
             # 计算最终坐标：局部坐标 -> 旋转 -> 平移
             points_local = self.to_points(single_repr)
             rotations = quaternion_to_matrix(quaternions)
